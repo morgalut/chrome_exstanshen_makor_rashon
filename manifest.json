@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "Makor Rishon – Sidebar Recommendations",
+  "version": "0.3.0",
+  "description": "Injects personalized recommendations into the Makor Rishon sidebar (.jegStickyHolder).",
+  "minimum_chrome_version": "114",
+
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+
+  "permissions": [
+    "storage",
+    "cookies"
+  ],
+
+  "host_permissions": [
+    "https://*.makorrishon.co.il/*",
+    "https://reco.example.com/*",
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*",
+    "http://0.0.0.0:8000/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["https://*.makorrishon.co.il/*"],
+      "js": ["ga.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "action": {
+    "default_title": "Makor Rishon Recs",
+    "default_popup": "popup.html"
+  },
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}
