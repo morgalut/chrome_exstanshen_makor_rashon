@@ -80,14 +80,32 @@ function extractCategoryFromPath() {
 }
 function deriveCategory() { return extractCategoryFromDom() || extractCategoryFromPath() || ""; }
 
+function getCanonicalUrl() {
+  const link = document.querySelector('link[rel="canonical"]')?.href;
+  if (link) return link;
+  try { return new URL(location.href).href; } catch { return location.href; }
+}
+
+function deriveGaClientId() {
+  try {
+    if (typeof extractGaClientIdFromCookieString === "function") {
+      return extractGaClientIdFromCookieString(document.cookie) || null;
+    }
+  } catch {}
+  return null;
+}
+
 function getPageContext() {
   return {
     origin: location.origin,
+    url: getCanonicalUrl(),              // ✅ include concrete URL
     slug: deriveSlug(),
     title: extractTitle(),
     subtitle: extractSubtitle(),
     firstParagraph: extractFirstParagraph(),
-    category: deriveCategory()
+    category: deriveCategory(),
+    gaClientId: deriveGaClientId(),      // ✅ include GA clientId if derivable on page
+    capturedAt: Date.now(),              // ✅ useful for debugging in popup
   };
 }
 
@@ -234,7 +252,7 @@ function buildBlock(items, gaId) {
     a.href = href;
     a.target = "_self";
     a.rel = "noopener";
-    a.textContent = raw.title || ""; // background guarantees non-empty; still safe
+    a.textContent = raw.title || ""; // safe fallback
     meta.appendChild(a);
 
     // Click tracking
@@ -405,15 +423,28 @@ async function renderRecommendations() {
 }
 
 /* ===========================
-   Popup bridge: allow popup to request the current page context
+   Popup bridge: allow popup to request the current page context.
+   Also persist to chrome.storage.local for debugging/inspection.
    =========================== */
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg && msg.type === "MR_GET_PAGE_CONTEXT") {
     try {
       const page = getPageContext();
+
+      // Persist latest captured payload for DevTools/Application → Storage
+      chrome.storage.local.set({ pageContext: page, pageContextTimestamp: Date.now() }).catch(() => {});
+
+      // Also stash in sessionStorage for quick manual checks
+      try { sessionStorage.setItem('lastPageContext', JSON.stringify(page)); } catch {}
+
+      // Log for easy debugging
+      console.log("[MR-EXT] Sending page context to popup:", page);
+
       sendResponse({ ok: true, page });
     } catch (e) {
-      sendResponse({ ok: false, error: String(e) });
+      const err = { ok: false, error: String(e) };
+      console.error("[MR-EXT] Error getting page context:", err);
+      sendResponse(err);
     }
     return true;
   }

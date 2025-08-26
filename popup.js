@@ -2,7 +2,7 @@ const toggleEl = document.getElementById("toggle");
 const statusEl = document.getElementById("status");
 const listEl = document.getElementById("list");
 
-// Small helper: GA cookie -> clientId "XXXXXXXXXX.YYYYYYYYYY"
+// GA cookie → clientId "XXXXXXXXXX.YYYYYYYYYY"
 function parseGaClientIdFromCookieValue(gaCookieValue) {
   try {
     const v = decodeURIComponent(gaCookieValue || "");
@@ -18,6 +18,7 @@ function setStatus(msg, isError = false) {
   statusEl.classList.toggle("error", !!isError);
 }
 
+// TITLES-ONLY rendering (with correct links)
 function showList(items) {
   listEl.innerHTML = "";
   if (!items || !items.length) {
@@ -25,39 +26,15 @@ function showList(items) {
     return;
   }
   for (const it of items) {
+    if (!it?.url) continue;
     const li = document.createElement("li");
-    li.className = "item";
-
-    const aImg = document.createElement("a");
-    aImg.href = it.url;
-    aImg.target = "_blank";
-    aImg.rel = "noopener";
-
-    const img = document.createElement("img");
-    img.className = "thumb";
-    img.loading = "lazy";
-    img.decoding = "async";
-    img.src = it.image || "";
-    img.alt = "";
-    aImg.appendChild(img);
-    li.appendChild(aImg);
-
-    const meta = document.createElement("div");
-    if (it.category) {
-      const cat = document.createElement("div");
-      cat.className = "cat";
-      cat.textContent = it.category;
-      meta.appendChild(cat);
-    }
     const a = document.createElement("a");
-    a.className = "link";
     a.href = it.url;
     a.target = "_blank";
     a.rel = "noopener";
     a.textContent = it.title || it.id || "(ללא כותרת)";
-    meta.appendChild(a);
-
-    li.appendChild(meta);
+    a.title = it.title || ""; // tooltip for long titles
+    li.appendChild(a);
     listEl.appendChild(li);
   }
   listEl.classList.remove("hidden");
@@ -72,19 +49,22 @@ async function initToggle() {
   });
 }
 
-async function getActiveTabId() {
+async function getActiveTab() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  return tabs && tabs[0] ? tabs[0].id : null;
+  return tabs && tabs[0] ? tabs[0] : null;
 }
 
+// Ask content script for payload (internally), but do NOT display it
 async function getPageContextFromTab(tabId) {
   try {
     const res = await chrome.tabs.sendMessage(tabId, { type: "MR_GET_PAGE_CONTEXT" });
     if (res?.ok) return res.page;
   } catch {
-    // This fails if the content script is not injected on the tab (non-allowed site)
+    // content script may not be present on this tab
   }
-  return null;
+  // Optional fallback if content script cached it in storage (still not displayed)
+  const { pageContext = null } = await chrome.storage.local.get(["pageContext"]);
+  return pageContext;
 }
 
 async function getGaClientIdForUrl(pageUrl) {
@@ -117,30 +97,35 @@ async function run() {
   await initToggle();
 
   setStatus("טוען…");
-  const tabId = await getActiveTabId();
-  if (!tabId) {
+  const tab = await getActiveTab();
+  if (!tab?.id) {
     setStatus("לא נמצאה לשונית פעילה", true);
     return;
   }
 
-  // Ask the content script on this tab for the page context
-  const page = await getPageContextFromTab(tabId);
+  // Get page context (not displayed)
+  const page = await getPageContextFromTab(tab.id);
   if (!page || !page.slug) {
     setStatus("פתח כתבה באתר makorrishon.co.il כדי לראות המלצות כאן.", true);
+    showList([]);
     return;
   }
 
-  // GA client ID (fallback to anonymous if needed)
-  let gaId = await getGaClientIdForUrl(page.origin);
+  // GA client ID
+  let gaId = await getGaClientIdForUrl(page.origin || tab.url);
   if (!gaId) {
-    // Anonymous fallback so the popup still shows something
-    const a = new Uint8Array(10);
-    crypto.getRandomValues(a);
-    gaId = "anon_" + [...a].map(x => x.toString(36)).join("");
+    if (page.gaClientId) {
+      gaId = page.gaClientId;
+    } else {
+      const a = new Uint8Array(10);
+      crypto.getRandomValues(a);
+      gaId = "anon_" + [...a].map(x => x.toString(36)).join("");
+    }
   }
 
-  // Fetch recs via the background worker
+  // Ask background to fetch and normalize results
   const items = await fetchRecs(gaId, page, 5);
+
   if (!items.length) {
     setStatus("אין המלצות זמינות כעת.");
     showList([]);

@@ -1,5 +1,5 @@
 // background.js (MV3 service worker)
-const VERSION = "0.2.3";
+const VERSION = "0.2.5";
 
 // IMPORTANT: 0.0.0.0 is a listen address only. Use 127.0.0.1/localhost or your prod host.
 const RECO_API_BASE = "http://127.0.0.1:8000";
@@ -37,10 +37,9 @@ async function setCached(key, value, ttlMs) {
 
 /**
  * Build a navigable URL from an id/slug and a site origin.
- * Handles these cases:
  *  - full URL → returns as-is
  *  - "news/157317" → https://host/news/157317
- *  - "157317" (numeric WP id, no url in payload) → https://host/?p=157317  ← FIX
+ *  - "157317" (numeric WP id) → https://host/?p=157317
  */
 function buildUrlFromId(id, origin = MR_DEFAULT_ORIGIN) {
   const s = String(id || "").trim();
@@ -48,15 +47,12 @@ function buildUrlFromId(id, origin = MR_DEFAULT_ORIGIN) {
   if (/^https?:\/\//i.test(s)) return s;
 
   const o = (origin || MR_DEFAULT_ORIGIN).replace(/\/+$/, "");
-  // If it's a pure numeric WordPress post id, prefer the canonical fallback '?p='
   if (/^\d+$/.test(s)) return `${o}/?p=${s}`;
 
-  // Otherwise treat as path/slugs (ensure single leading slash)
   const path = s.replace(/^\/+/, "");
   return `${o}/${path}`;
 }
 
-/** helpers to robustly map server payloads */
 function pickFirst(...vals) {
   for (const v of vals) {
     if (v == null) continue;
@@ -78,20 +74,18 @@ function slugFromAny(it) {
   }
 }
 
-/** Defensive normalization of backend items → {id,title,url,image,category,subtitle} */
+/** Normalize raw server results → items with {id,title,url} (image kept for on-page use) */
 function normalizeItems(items, origin = MR_DEFAULT_ORIGIN) {
   const arr = Array.isArray(items) ? items : [];
   return arr
     .map((it) => {
       const id = slugFromAny(it);
       const title = pickFirst(it?.title, it?.metadata?.title, it?.headline, it?.name, it?.post_title);
-      const subtitle = pickFirst(it?.subtitle, it?.dek, it?.subhead, it?.metadata?.subtitle);
-      const category = pickFirst(it?.category, it?.section, it?.metadata?.category);
-
       const url =
         pickFirst(it?.url, it?.link, it?.permalink, it?.metadata?.url) ||
-        buildUrlFromId(id, origin); // ← now yields '?p=ID' for numeric ids
+        buildUrlFromId(id, origin);
 
+      // Keep image for on-page sidebar (popup won’t use it)
       const image = pickFirst(
         it?.image,
         it?.image_url,
@@ -101,25 +95,17 @@ function normalizeItems(items, origin = MR_DEFAULT_ORIGIN) {
         it?.metadata?.image,
         it?.metadata?.image_url
       );
+      const category = pickFirst(it?.category, it?.section, it?.metadata?.category);
 
-      // Guarantee a non-empty title by falling back to the id
-      const safeTitle = title || id;
-
-      return { id, title: safeTitle, subtitle, category, url, image };
+      return { id, title: title || id, url, image, category };
     })
-    // only require id + url; title is guaranteed above
     .filter((it) => it.id && it.url);
 }
 
-/** Try to read the _ga cookie via chrome.cookies (fallback path) */
 async function getGaFromCookies(urlLike) {
   try {
     const origin = (() => {
-      try {
-        return new URL(urlLike || MR_DEFAULT_ORIGIN).origin;
-      } catch {
-        return MR_DEFAULT_ORIGIN;
-      }
+      try { return new URL(urlLike || MR_DEFAULT_ORIGIN).origin; } catch { return MR_DEFAULT_ORIGIN; }
     })();
     const cookie = await chrome.cookies.get({ url: origin, name: "_ga" });
     return cookie?.value || null;
@@ -128,7 +114,6 @@ async function getGaFromCookies(urlLike) {
   }
 }
 
-/** Prepare the request body for /recommend-articles */
 function buildRecommendBody(gaId, page = {}) {
   const current_article = {
     id: String(page.slug || "").trim(),
@@ -140,7 +125,6 @@ function buildRecommendBody(gaId, page = {}) {
   return { user_id: String(gaId || "").trim(), current_article };
 }
 
-/** Minimal validation so we don't hit backend with bad payloads */
 function validateRecommendBody(body) {
   if (!body?.user_id) return "missing user_id (GA client ID)";
   if (!body?.current_article?.id) return "missing current_article.id (slug)";
@@ -149,29 +133,24 @@ function validateRecommendBody(body) {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
-    // Get GA cookie value (raw)
     if (msg?.type === "MR_GET_COOKIE") {
       const raw = await getGaFromCookies(msg.pageUrl);
       sendResponse({ ok: true, value: raw || null });
       return;
     }
 
-    // Fetch recommendations by POSTing a "read" to /recommend-articles
     if (msg?.type === "MR_FETCH_RECS") {
       const { gaId, page, limit = 5 } = msg;
       const origin = page?.origin || MR_DEFAULT_ORIGIN;
 
-      // Cache key includes GA ID + slug + limit
       const key = `recs:${gaId}:${page?.slug || ""}:${limit}`;
 
-      // 1) cache
       const cached = await getCached(key);
       if (cached) {
         sendResponse({ ok: true, data: cached, cached: true });
         return;
       }
 
-      // 2) Build POST body for /recommend-articles
       const body = buildRecommendBody(gaId, page);
       const bad = validateRecommendBody(body);
       if (bad) {
@@ -179,11 +158,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         return;
       }
 
-      // Backend supports ?top_k=3..5 (defaults to 5)
       const topK = Math.min(Math.max(Number(limit) || 5, 3), 5);
       const url = `${RECO_API_BASE}/recommend-articles?top_k=${topK}`;
 
-      // 3) POST with one retry
       let json = null;
       try {
         let res = await fetchWithTimeout(
@@ -192,9 +169,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             method: "POST",
             headers: {
               "Content-Type": "application/json; charset=utf-8",
-              "x-mr-ext-version": VERSION,
+              "x-mr-ext-version": VERSION
             },
-            body: JSON.stringify(body),
+            body: JSON.stringify(body)
           },
           5000
         );
@@ -209,9 +186,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
               method: "POST",
               headers: {
                 "Content-Type": "application/json; charset=utf-8",
-                "x-mr-ext-version": VERSION,
+                "x-mr-ext-version": VERSION
               },
-              body: JSON.stringify(body),
+              body: JSON.stringify(body)
             },
             6000
           );
@@ -223,26 +200,23 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
       }
 
-      // 4) Normalize response: router returns an array of ArticleResponse
       const items = normalizeItems(Array.isArray(json) ? json : json?.items, origin);
-
       const payload = { items };
       await setCached(key, payload, 300_000); // 5 min
       sendResponse({ ok: true, data: payload, cached: false });
       return;
     }
 
-    // Fire-and-forget telemetry/events (optional)
     if (msg?.type === "MR_EVENT") {
       try {
         await fetch(`${RECO_API_BASE}/v1/events/${msg.event}`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "x-mr-ext-version": VERSION,
+            "x-mr-ext-version": VERSION
           },
           body: JSON.stringify(msg.payload),
-          credentials: "omit",
+          credentials: "omit"
         });
       } catch {
         /* ignore */
@@ -251,10 +225,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return;
     }
 
-    // Unknown
     sendResponse({ ok: false, error: "unknown_message" });
   })();
 
-  // Keep the channel open for async sendResponse
   return true;
 });

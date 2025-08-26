@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Makor Rishon – Sidebar Recommendations",
-  "version": "0.3.0",
-  "description": "Injects personalized recommendations into the Makor Rishon sidebar (.jegStickyHolder).",
+  "version": "0.3.1",
+  "description": "Injects personalized recommendations into the Makor Rishon sidebar (.jegStickyHolder) and shows the captured page payload in the popup.",
   "minimum_chrome_version": "114",
 
   "icons": {
